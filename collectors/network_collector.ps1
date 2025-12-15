@@ -16,6 +16,7 @@ function Write-Event {
     } catch {}
 }
 
+# Track already-seen connections
 $Seen = @{}
 
 while ($true) {
@@ -26,13 +27,13 @@ while ($true) {
 
         if ($line -match "\s+(TCP|UDP)\s+([\d\.\:]+)\s+([\d\.\:]+)\s+(\w+)\s+(\d+)") {
 
-            $proto = $matches[1]
-            $local = $matches[2]
-            $remote = $matches[3]
-            $state = $matches[4]
-            $pid = $matches[5]
+            $protocol = $matches[1]
+            $local    = $matches[2]
+            $remote   = $matches[3]
+            $state    = $matches[4]
+            $procId   = $matches[5]
 
-            $key = "$proto|$local|$remote|$pid"
+            $key = "$protocol|$local|$remote|$procId"
 
             if (-not $Seen.ContainsKey($key)) {
                 $Seen[$key] = $true
@@ -40,11 +41,11 @@ while ($true) {
                 Write-Event @{
                     ts         = (Get-Date).ToUniversalTime().ToString("o")
                     collector = $CollectorName
-                    protocol  = $proto
+                    protocol  = $protocol
                     local     = $local
                     remote    = $remote
                     state     = $state
-                    pid       = $pid
+                    pid       = $procId
                 }
             }
         }

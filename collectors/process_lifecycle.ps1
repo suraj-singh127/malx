@@ -1,54 +1,120 @@
 <#
-Network Connection Collector
-Uses netstat polling with delta detection
+Process Lifecycle Collector
+Captures process start and stop events using WMI
+Outputs JSONL telemetry
 #>
 
-$CollectorName = "network"
-$LogPath = "$PSScriptRoot\network.jsonl"
+# ==============================
+# Configuration
+# ==============================
+
+$CollectorName = "process_lifecycle"
+$LogPath = "$PSScriptRoot\process_lifecycle.jsonl"
+
+$IgnoredImages = @(
+    "powershell.exe",
+    "cmd.exe",
+    "conhost.exe"
+)
+
+# ==============================
+# Initialize Log Writer
+# ==============================
 
 $LogWriter = New-Object System.IO.StreamWriter($LogPath, $true)
 $LogWriter.AutoFlush = $true
 
 function Write-Event {
-    param([hashtable]$Record)
+    param (
+        [hashtable]$Record
+    )
+
     try {
-        $LogWriter.WriteLine(($Record | ConvertTo-Json -Compress))
-    } catch {}
+        $json = $Record | ConvertTo-Json -Compress -Depth 5
+        $LogWriter.WriteLine($json)
+    } catch {
+        # Collector must never crash
+    }
 }
 
-$Seen = @{}
+# ==============================
+# Process Start Handler
+# ==============================
 
-while ($true) {
+Register-WmiEvent -Class Win32_ProcessStartTrace -Action {
 
-    $lines = netstat -ano | Select-Object -Skip 4
+    $e = $Event.SourceEventArgs.NewEvent
 
-    foreach ($line in $lines) {
+    $procId        = $e.ProcessID
+    $parentProcId  = $e.ParentProcessID
+    $image         = $e.ProcessName
 
-        if ($line -match "\s+(TCP|UDP)\s+([\d\.\:]+)\s+([\d\.\:]+)\s+(\w+)\s+(\d+)") {
-
-            $proto = $matches[1]
-            $local = $matches[2]
-            $remote = $matches[3]
-            $state = $matches[4]
-            $pid = $matches[5]
-
-            $key = "$proto|$local|$remote|$pid"
-
-            if (-not $Seen.ContainsKey($key)) {
-                $Seen[$key] = $true
-
-                Write-Event @{
-                    ts         = (Get-Date).ToUniversalTime().ToString("o")
-                    collector = $CollectorName
-                    protocol  = $proto
-                    local     = $local
-                    remote    = $remote
-                    state     = $state
-                    pid       = $pid
-                }
-            }
-        }
+    if ($IgnoredImages -contains $image) {
+        return
     }
 
-    Start-Sleep -Seconds 2
+    $imagePath = $null
+    $cmdline   = $null
+    $user      = $null
+    $sessionId = $null
+
+    try {
+        $proc = Get-CimInstance Win32_Process -Filter "ProcessId=$procId"
+
+        $imagePath = $proc.ExecutablePath
+        $cmdline   = $proc.CommandLine
+        $sessionId = $proc.SessionId
+
+        try {
+            $owner = $proc | Invoke-CimMethod -MethodName GetOwner
+            $user = "$($owner.Domain)\$($owner.User)"
+        } catch {
+            $user = $null
+        }
+    } catch {
+        # Process may have already exited
+    }
+
+    Write-Event @{
+        ts          = (Get-Date).ToUniversalTime().ToString("o")
+        collector  = $CollectorName
+        event      = "process_start"
+        pid        = $procId
+        ppid       = $parentProcId
+        image      = $image
+        image_path = $imagePath
+        cmdline    = $cmdline
+        user       = $user
+        session_id = $sessionId
+    }
+}
+
+# ==============================
+# Process Stop Handler
+# ==============================
+
+Register-WmiEvent -Class Win32_ProcessStopTrace -Action {
+
+    $e = $Event.SourceEventArgs.NewEvent
+
+    Write-Event @{
+        ts         = (Get-Date).ToUniversalTime().ToString("o")
+        collector = $CollectorName
+        event     = "process_stop"
+        pid       = $e.ProcessID
+        exit_code = $e.ExitStatus
+    }
+}
+
+# ==============================
+# Main Loop
+# ==============================
+
+try {
+    while ($true) {
+        Wait-Event | Out-Null
+    }
+}
+finally {
+    $LogWriter.Close()
 }
